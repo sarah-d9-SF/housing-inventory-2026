@@ -153,6 +153,7 @@ with col_stats:
     if clicked_nhood:
         row = gdf_map[gdf_map["nhood"] == clicked_nhood].iloc[0]
         st.subheader(row["nhood"])
+        st.caption(f"Totals for {year_range[0]}–{year_range[1]}")
         st.metric("Net Units Completed", f"{row['Net_Units']:,}")
 
         c1, c2 = st.columns(2)
@@ -175,7 +176,7 @@ with col_stats:
                     st.write(f"- {label}: **{val:,}**")
     else:
         st.subheader("Citywide Totals")
-        st.caption("Click a neighborhood on the map for details.")
+        st.caption(f"Totals for {year_range[0]}–{year_range[1]} · Click a neighborhood for details.")
         net = int(filtered["Net Units Completed"].sum())
         mkt = int(filtered["Market Rate"].sum())
         aff = int(filtered["Affordable Units"].sum())
@@ -214,10 +215,10 @@ else:
 
 year_agg = (
     chart_data.groupby("Year")
-    .agg(
-        Market_Rate=("Market Rate", "sum"),
-        Affordable=("Affordable Units", "sum"),
-    )
+    .agg(**{
+        "Market Rate": ("Market Rate", "sum"),
+        "Affordable": ("Affordable Units", "sum"),
+    })
     .reset_index()
     .melt("Year", var_name="Type", value_name="Units")
 )
@@ -243,3 +244,65 @@ chart = (
 )
 
 st.altair_chart(chart, use_container_width=True)
+
+# --- Planning District Rankings ---
+st.markdown("---")
+st.subheader(f"Planning District Rankings — {year_range[0]}–{year_range[1]}")
+
+# Aggregate by planning district, keeping only clean "N - Name" entries
+district_agg = (
+    filtered[filtered["Planning Dist."].str.match(r"^\d+ - ", na=False)]
+    .groupby("Planning Dist.")
+    .agg(
+        Net_Units=("Net Units Completed", "sum"),
+        Market_Rate=("Market Rate", "sum"),
+        Affordable=("Affordable Units", "sum"),
+        ADU=("ADU/Legalization Units", "sum"),
+    )
+    .reset_index()
+    .sort_values("Net_Units", ascending=False)
+    .reset_index(drop=True)
+)
+district_agg.insert(0, "Rank", range(1, len(district_agg) + 1))
+
+# Rename for clean Altair field names
+district_chart_df = district_agg.rename(columns={
+    "Planning Dist.": "District",
+    "Net_Units": "Net Units",
+    "Market_Rate": "Market Rate",
+    "Affordable": "Affordable",
+    "ADU": "ADUs",
+})
+
+# Horizontal bar chart
+bar = (
+    alt.Chart(district_chart_df)
+    .mark_bar()
+    .encode(
+        x=alt.X("Net Units:Q", title="Net Units Completed"),
+        y=alt.Y("District:N", sort="-x", title=None),
+        color=alt.Color(
+            "District:N",
+            scale=alt.Scale(scheme="tableau20"),
+            legend=None,
+        ),
+        opacity=alt.condition(
+            alt.datum.District == "11 - Bernal Heights",
+            alt.value(1.0),
+            alt.value(0.75),
+        ),
+        tooltip=[
+            alt.Tooltip("District:N", title="District"),
+            alt.Tooltip("Net Units:Q", title="Net Units"),
+            alt.Tooltip("Market Rate:Q", title="Market Rate"),
+            alt.Tooltip("Affordable:Q", title="Affordable"),
+            alt.Tooltip("ADUs:Q", title="ADUs"),
+        ],
+    )
+    .properties(height=420)
+)
+st.altair_chart(bar, use_container_width=True)
+
+# Summary table
+st.markdown("**Full ranking table**")
+st.dataframe(district_chart_df, use_container_width=True, hide_index=True)
