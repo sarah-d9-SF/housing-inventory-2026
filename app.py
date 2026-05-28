@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import geopandas as gpd
 import folium
+import altair as alt
 from streamlit_folium import st_folium
 from shapely.geometry import Point
 from pathlib import Path
@@ -42,6 +43,12 @@ def load_housing_data():
                 "Very Low Income", "Low Income", "Moderate Income"]:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
+    # Split ADU/Legalization Units into true ADUs vs legalizations
+    is_legalization = df["Description"].str.contains("legali", case=False, na=False)
+    has_adu = df["ADU/Legalization Units"] > 0
+    df["Legalization_Units"] = df["ADU/Legalization Units"].where(has_adu & is_legalization, 0)
+    df["True_ADU_Units"] = df["ADU/Legalization Units"].where(has_adu & ~is_legalization, 0)
+
     return df
 
 @st.cache_data
@@ -75,6 +82,8 @@ agg = (
         Market_Rate=("Market Rate", "sum"),
         Affordable=("Affordable Units", "sum"),
         ADU=("ADU/Legalization Units", "sum"),
+        True_ADU=("True_ADU_Units", "sum"),
+        Legalizations=("Legalization_Units", "sum"),
         Extremely_Low=("Extremely Low Income", "sum"),
         Very_Low=("Very Low Income", "sum"),
         Low=("Low Income", "sum"),
@@ -86,14 +95,13 @@ agg = (
 
 # Merge stats into geodataframe
 gdf_map = gdf.merge(agg, on="nhood", how="left")
-for col in ["Net_Units", "Market_Rate", "Affordable", "ADU",
+for col in ["Net_Units", "Market_Rate", "Affordable", "ADU", "True_ADU", "Legalizations",
             "Extremely_Low", "Very_Low", "Low", "Moderate"]:
     gdf_map[col] = gdf_map[col].fillna(0).astype(int)
 
 # --- Build Folium map ---
 m = folium.Map(location=[37.757, -122.44], zoom_start=12, tiles="CartoDB positron")
 
-# Choropleth: color by net units completed
 folium.Choropleth(
     geo_data=gdf_map.__geo_interface__,
     data=gdf_map,
@@ -107,19 +115,10 @@ folium.Choropleth(
     highlight=True,
 ).add_to(m)
 
-# Transparent overlay for tooltips and click detection
 folium.GeoJson(
     gdf_map.__geo_interface__,
-    style_function=lambda _: {
-        "fillOpacity": 0,
-        "color": "#555",
-        "weight": 0.5,
-    },
-    highlight_function=lambda _: {
-        "fillOpacity": 0.15,
-        "color": "#222",
-        "weight": 2,
-    },
+    style_function=lambda _: {"fillOpacity": 0, "color": "#555", "weight": 0.5},
+    highlight_function=lambda _: {"fillOpacity": 0.15, "color": "#222", "weight": 2},
     tooltip=folium.GeoJsonTooltip(
         fields=["nhood", "Net_Units", "Market_Rate", "Affordable", "ADU"],
         aliases=["Neighborhood", "Net Units", "Market Rate", "Affordable", "ADUs"],
@@ -160,41 +159,87 @@ with col_stats:
         c1.metric("Market Rate", f"{row['Market_Rate']:,}")
         c2.metric("Affordable", f"{row['Affordable']:,}")
         st.metric("ADU / Legalization Units", f"{row['ADU']:,}")
+        e1, e2 = st.columns(2)
+        e1.metric("↳ True ADUs", f"{row['True_ADU']:,}")
+        e2.metric("↳ Legalizations", f"{row['Legalizations']:,}")
 
         if row["Affordable"] > 0:
             st.markdown("**Affordable unit breakdown:**")
-            breakdown = {
-                "Extremely Low Income": row["Extremely_Low"],
-                "Very Low Income": row["Very_Low"],
-                "Low Income": row["Low"],
-                "Moderate Income": row["Moderate"],
-            }
-            for label, val in breakdown.items():
+            for label, val in [
+                ("Extremely Low Income", row["Extremely_Low"]),
+                ("Very Low Income", row["Very_Low"]),
+                ("Low Income", row["Low"]),
+                ("Moderate Income", row["Moderate"]),
+            ]:
                 if val > 0:
                     st.write(f"- {label}: **{val:,}**")
     else:
-        # Citywide totals when nothing is selected
         st.subheader("Citywide Totals")
         st.caption("Click a neighborhood on the map for details.")
         net = int(filtered["Net Units Completed"].sum())
         mkt = int(filtered["Market Rate"].sum())
         aff = int(filtered["Affordable Units"].sum())
         adu = int(filtered["ADU/Legalization Units"].sum())
+        true_adu = int(filtered["True_ADU_Units"].sum())
+        legalizations = int(filtered["Legalization_Units"].sum())
 
         st.metric("Net Units Completed", f"{net:,}")
         c1, c2 = st.columns(2)
         c1.metric("Market Rate", f"{mkt:,}")
         c2.metric("Affordable", f"{aff:,}")
         st.metric("ADU / Legalization Units", f"{adu:,}")
+        e1, e2 = st.columns(2)
+        e1.metric("↳ True ADUs", f"{true_adu:,}")
+        e2.metric("↳ Legalizations", f"{legalizations:,}")
 
         if aff > 0:
             st.markdown("**Affordable unit breakdown:**")
-            aff_breakdown = {
-                "Extremely Low Income": int(filtered["Extremely Low Income"].sum()),
-                "Very Low Income": int(filtered["Very Low Income"].sum()),
-                "Low Income": int(filtered["Low Income"].sum()),
-                "Moderate Income": int(filtered["Moderate Income"].sum()),
-            }
-            for label, val in aff_breakdown.items():
+            for label, val in [
+                ("Extremely Low Income", int(filtered["Extremely Low Income"].sum())),
+                ("Very Low Income", int(filtered["Very Low Income"].sum())),
+                ("Low Income", int(filtered["Low Income"].sum())),
+                ("Moderate Income", int(filtered["Moderate Income"].sum())),
+            ]:
                 if val > 0:
                     st.write(f"- {label}: **{val:,}**")
+
+# --- Bar chart: units by year ---
+st.markdown("---")
+if clicked_nhood:
+    chart_title = f"Units completed per year — {clicked_nhood}"
+    chart_data = filtered[filtered["Neighborhood"] == clicked_nhood]
+else:
+    chart_title = "Units completed per year — Citywide"
+    chart_data = filtered
+
+year_agg = (
+    chart_data.groupby("Year")
+    .agg(
+        Market_Rate=("Market Rate", "sum"),
+        Affordable=("Affordable Units", "sum"),
+    )
+    .reset_index()
+    .melt("Year", var_name="Type", value_name="Units")
+)
+year_agg["Year"] = year_agg["Year"].astype(int)
+
+chart = (
+    alt.Chart(year_agg)
+    .mark_bar()
+    .encode(
+        x=alt.X("Year:O", title="Year"),
+        y=alt.Y("Units:Q", title="Net Units"),
+        color=alt.Color(
+            "Type:N",
+            scale=alt.Scale(
+                domain=["Market Rate", "Affordable"],
+                range=["#4e79a7", "#f28e2b"],
+            ),
+            legend=alt.Legend(title=""),
+        ),
+        tooltip=["Year:O", "Type:N", "Units:Q"],
+    )
+    .properties(title=chart_title, height=250)
+)
+
+st.altair_chart(chart, use_container_width=True)
